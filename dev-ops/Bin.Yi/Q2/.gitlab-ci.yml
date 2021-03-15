@@ -1,0 +1,114 @@
+image: docker:latest
+services:
+  - docker:dind
+
+variables:
+  DOCKER_DRIVER: overlay
+  SPRING_PROFILES_ACTIVE: gitlab-ci
+  DOCKER_IMAGE: registry.gitlab.com/bin3377/deploy-helloworld
+
+stages:
+  - unit-test
+  - build
+  - package
+  - integration-test
+  - deploy
+
+maven-test:
+  image: maven:3.6.3-openjdk-15-slim
+  stage: unit-test
+  tags: ["gitlab-org-docker"]
+  except:
+    variables: 
+      - $DEPLOY_TAG
+  script:
+    - cd app && mvn test -B
+
+maven-build:
+  image: maven:3.6.3-openjdk-15-slim
+  stage: build
+  tags: ["gitlab-org-docker"]
+  except:
+    variables: 
+      - $DEPLOY_TAG
+  script:
+    - cd app && mvn package -B
+  artifacts:
+    paths:
+      - app/target/*.war
+    expire_in: 1 hour
+
+.docker-build:
+  stage: package
+  tags: ["gitlab-org-docker"]
+  except:
+    variables: 
+      - $DEPLOY_TAG
+  script:
+    - docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
+    - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN registry.gitlab.com
+    - docker push ${DOCKER_IMAGE}:${CI_PIPELINE_ID}
+
+docker-build-master:
+  extends:
+    - .docker-build
+  only:
+    - master
+  variables:
+    DOCKER_TAG: ${CI_PIPELINE_ID}
+
+docker-build-tags:
+  extends:
+    - .docker-build
+  only:
+    - tags
+  variables:
+    DOCKER_TAG: ${CI_COMMIT_TAG}
+
+image-test:
+  stage: integration-test
+  tags: ["gitlab-org-docker"]
+  only:
+    - master
+  except:
+    variables: 
+      - $DEPLOY_TAG
+  script:
+    - docker login -u gitlab-ci-token -p $CI_BUILD_TOKEN registry.gitlab.com
+    - docker pull ${DOCKER_IMAGE}:${CI_PIPELINE_ID}
+    - echo "run test with image"
+
+.k8s-deploy:
+  image: google/cloud-sdk
+  stage: deploy
+  tags: ["gitlab-org-docker"]
+  script:
+    - gcloud auth activate-service-account --key-file ${GOOGLE_KEY_FILE}
+    - gcloud config set project solid-bliss-307605
+    - gcloud config set compute/zone us-west1-a
+    - gcloud config set container/use_client_certificate False
+    - gcloud container clusters get-credentials dev-cluster
+    - kubectl config set-context --current --namespace=helloworld
+    - kubectl delete secret registry.gitlab.com || true
+    - kubectl create secret docker-registry registry.gitlab.com --docker-server=https://registry.gitlab.com --docker-username=bin3377 --docker-password=${GITLAB_REGISTRY_PASSWORD} --docker-email=binyi3377@gmail.com
+    - kubectl apply -f ./k8s/helloworld/
+    - kubectl set image deployment/helloworld helloworld=${DOCKER_IMAGE}:${DOCKER_TAG}
+    - kubectl rollout restart deployment/helloworld
+    - kubectl rollout status -w deployment/helloworld
+
+k8s-deploy-tags:
+  extends:
+    - .k8s-deploy
+  only:
+    - tags
+  variables:
+    DOCKER_TAG: ${CI_COMMIT_TAG}
+
+k8s-deploy-on-demand:
+  extends:
+    - .k8s-deploy
+  only:
+    variables: 
+      - $DEPLOY_TAG
+  variables:
+    DOCKER_TAG: ${DEPLOY_TAG}

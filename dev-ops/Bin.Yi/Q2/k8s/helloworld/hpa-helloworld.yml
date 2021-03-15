@@ -1,0 +1,15 @@
+apiVersion: autoscaling/v1
+kind: HorizontalPodAutoscaler
+metadata:
+  labels:
+    k8s-app: helloworld
+  name: kraken-hpa
+  namespace: helloworld
+spec:
+  maxReplicas: 5
+  minReplicas: 1
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: helloworld
+  targetCPUUtilizationPercentage: 80
